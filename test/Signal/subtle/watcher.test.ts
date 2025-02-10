@@ -1,7 +1,7 @@
-import {afterEach, describe, expect, it, vi} from 'vitest';
-import {Signal} from '../../../src/index.js';
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Signal } from "../../../src/index.js";
 
-describe('Watcher', () => {
+describe("Watcher", () => {
   type Destructor = () => void;
   const notifySpy = vi.fn();
 
@@ -29,7 +29,7 @@ describe('Watcher', () => {
 
   afterEach(() => watcher.unwatch(...Signal.subtle.introspectSources(watcher)));
 
-  it('should work', () => {
+  it("should work", () => {
     const watchedSpy = vi.fn();
     const unwatchedSpy = vi.fn();
     const stateSignal = new Signal.State(1, {
@@ -149,7 +149,7 @@ describe('Watcher', () => {
     flushPending();
   });
 
-  it('provides `this` to notify as normal function', () => {
+  it("provides `this` to notify as normal function", () => {
     const mockGetPending = vi.fn();
 
     const watcher = new Signal.subtle.Watcher(function () {
@@ -164,7 +164,7 @@ describe('Watcher', () => {
     expect(mockGetPending).toBeCalled();
   });
 
-  it('can be closed in if needed in notify as an arrow function', () => {
+  it("can be closed in if needed in notify as an arrow function", () => {
     const mockGetPending = vi.fn();
 
     const watcher = new Signal.subtle.Watcher(() => {
@@ -179,7 +179,7 @@ describe('Watcher', () => {
     expect(mockGetPending).toBeCalled();
   });
 
-  it('should not break a computed signal to watch it before getting its value', () => {
+  it("should not break a computed signal to watch it before getting its value", () => {
     const signal = new Signal.State(0);
     const computedSignal = new Signal.Computed(() => signal.get());
     const watcher = new Signal.subtle.Watcher(() => {});

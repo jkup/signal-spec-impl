@@ -132,10 +132,16 @@ export namespace Signal {
       // Mark all dependent signals as dirty/pending and collect watchers
       const watchersToNotify = new Set<subtle.Watcher>();
 
+      // First mark all computed signals as dirty
       for (const sink of this.#sinks) {
         if (sink instanceof Computed) {
           sink.markDirty();
-        } else if (sink instanceof subtle.Watcher) {
+        }
+      }
+
+      // Then handle watchers
+      for (const sink of this.#sinks) {
+        if (sink instanceof subtle.Watcher) {
           if (sink.isWatching()) {
             watchersToNotify.add(sink);
             sink.markPending();
@@ -250,6 +256,11 @@ export namespace Signal {
         if (toRecompute) {
           toRecompute.recompute();
         }
+
+        // If we're still dirty after recomputing dependencies, recompute ourselves
+        if (this.#state === "dirty" || this.#state === "checked") {
+          this.recompute();
+        }
       }
 
       // At this point we should be clean
@@ -268,33 +279,35 @@ export namespace Signal {
     }
 
     /**
+     * Add state management
+     * Marks this computed as dirty, requiring recomputation
+     */
+    markDirty(): void {
+      // Always recompute when marked dirty
+      this.#state = "dirty";
+
+      // Mark all sinks as checked/pending
+      for (const sink of this.#sinks) {
+        if (sink instanceof Computed) {
+          if (sink.#state === "clean") {
+            sink.#state = "checked";
+          }
+        } else if (sink instanceof subtle.Watcher) {
+          if (sink.isWatching()) {
+            sink.markPending();
+          }
+        }
+      }
+    }
+
+    /**
      * Add source tracking
      * Adds a signal as a dependency of this computed
      */
     addSource(source: Signal<any>): void {
       this.#sources.add(source);
-    }
-
-    /**
-     * Add state management
-     * Marks this computed as dirty, requiring recomputation
-     */
-    markDirty(): void {
-      if (this.#state === "clean") {
-        this.#state = "dirty";
-
-        // Mark all sinks as checked/pending
-        for (const sink of this.#sinks) {
-          if (sink instanceof Computed) {
-            if (sink.#state === "clean") {
-              sink.#state = "checked";
-            }
-          } else if (sink instanceof subtle.Watcher) {
-            if (sink.isWatching()) {
-              sink.markPending();
-            }
-          }
-        }
+      if (source instanceof State || source instanceof Computed) {
+        source.addSink(this);
       }
     }
 
