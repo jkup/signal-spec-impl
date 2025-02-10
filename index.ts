@@ -9,11 +9,24 @@ let computing: any = null;
 let frozen: boolean = false;
 let generation: number = 0;
 
+// Define watched/unwatched symbols
+export const WATCHED = Symbol.for("watched");
+export const UNWATCHED = Symbol.for("unwatched");
+
 /**
  * Base Signal interface that both State and Computed implement
  */
 export interface Signal<T> {
   get(): T;
+}
+
+/**
+ * Options interface for Signal creation
+ */
+export interface SignalOptions<T> {
+  equals?: (this: Signal<T>, t: T, t2: T) => boolean;
+  [WATCHED]?: (this: Signal<T>) => void;
+  [UNWATCHED]?: (this: Signal<T>) => void;
 }
 
 /**
@@ -29,7 +42,13 @@ export namespace Signal {
    * - unwatched: The callback to be called when the signal is no longer observed by an effect
    * - sinks: Set of watched signals which depend on this one
    */
-  export class State<T> {
+  export class State<T> implements Signal<T> {
+    #value: T;
+    #equals: (this: Signal<T>, t: T, t2: T) => boolean;
+    #watched?: (this: Signal<T>) => void;
+    #unwatched?: (this: Signal<T>) => void;
+    #sinks: Set<Computed<any> | subtle.Watcher>;
+
     /**
      * Constructor Algorithm:
      * 1. Set this Signal's value to initialValue.
@@ -38,7 +57,13 @@ export namespace Signal {
      * 4. Set this Signal's unwatched to options?.[Signal.subtle.unwatched]
      * 5. Set this Signal's sinks to the empty set
      */
-    constructor(initialValue: T, options?: any) {}
+    constructor(initialValue: T, options?: SignalOptions<T>) {
+      this.#value = initialValue;
+      this.#equals = options?.equals ?? Object.is;
+      this.#watched = options?.[Symbol.for("watched")];
+      this.#unwatched = options?.[Symbol.for("unwatched")];
+      this.#sinks = new Set();
+    }
 
     /**
      * get() Algorithm:
@@ -48,7 +73,16 @@ export namespace Signal {
      * 4. Return this Signal's value.
      */
     get(): T {
-      throw new Error("Not implemented");
+      if (frozen) {
+        throw new Error("Cannot read signals during notify callback");
+      }
+
+      // If we're currently computing a signal, add this signal as a dependency
+      if (computing) {
+        computing.addSource(this);
+      }
+
+      return this.#value;
     }
 
     /**
@@ -69,8 +103,66 @@ export namespace Signal {
      *    If there are multiple exceptions, then package them up together into an AggregateError and throw that.
      * 8. Return undefined.
      */
-    set(value: T): void {
-      throw new Error("Not implemented");
+    set(newValue: T): void {
+      if (frozen) {
+        throw new Error("Cannot write signals during notify callback");
+      }
+
+      // Run set Signal value algorithm
+      if (this.#equals.call(this, this.#value, newValue)) {
+        return; // Clean exit - no changes needed
+      }
+
+      this.#value = newValue;
+
+      // Track exceptions from notify callbacks
+      const exceptions: Error[] = [];
+
+      // Mark all dependent signals as dirty/pending and collect watchers
+      const watchersToNotify = new Set<subtle.Watcher>();
+
+      for (const sink of this.#sinks) {
+        if (sink instanceof Computed) {
+          sink.markDirty();
+        } else if (sink instanceof subtle.Watcher) {
+          if (sink.isWatching()) {
+            watchersToNotify.add(sink);
+            sink.markPending();
+          }
+        }
+      }
+
+      // Notify watchers
+      for (const watcher of watchersToNotify) {
+        frozen = true;
+        try {
+          watcher.notify();
+        } catch (e) {
+          exceptions.push(e as Error);
+        } finally {
+          frozen = false;
+        }
+        watcher.markWaiting();
+      }
+
+      // If we collected any exceptions, throw them
+      if (exceptions.length === 1) {
+        throw exceptions[0];
+      } else if (exceptions.length > 1) {
+        throw new AggregateError(
+          exceptions,
+          "Multiple exceptions in notify callbacks"
+        );
+      }
+    }
+
+    // Internal methods
+    addSink(sink: Computed<any> | subtle.Watcher): void {
+      this.#sinks.add(sink);
+    }
+
+    removeSink(sink: Computed<any> | subtle.Watcher): void {
+      this.#sinks.delete(sink);
     }
   }
 
@@ -84,7 +176,7 @@ export namespace Signal {
    * - equals: The equals method provided in the options
    * - callback: The callback which is called to get the computed Signal's value
    */
-  export class Computed<T> {
+  export class Computed<T> implements Signal<T> {
     /**
      * Constructor Algorithm:
      * The constructor sets:
@@ -110,6 +202,16 @@ export namespace Signal {
      *    Return the Signal's value. If the value is an exception, rethrow that exception.
      */
     get(): T {
+      throw new Error("Not implemented");
+    }
+
+    // Add source tracking
+    addSource(source: Signal<any>): void {
+      throw new Error("Not implemented");
+    }
+
+    // Add state management
+    markDirty(): void {
       throw new Error("Not implemented");
     }
   }
@@ -170,6 +272,22 @@ export namespace Signal {
        * 1. Return an Array containing the subset of signals which are Computed Signals in the states ~dirty~ or ~pending~.
        */
       getPending(): Signal<any>[] {
+        throw new Error("Not implemented");
+      }
+
+      isWatching(): boolean {
+        throw new Error("Not implemented");
+      }
+
+      markPending(): void {
+        throw new Error("Not implemented");
+      }
+
+      markWaiting(): void {
+        throw new Error("Not implemented");
+      }
+
+      notify(): void {
         throw new Error("Not implemented");
       }
     }
