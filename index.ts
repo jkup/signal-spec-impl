@@ -30,6 +30,11 @@ export interface SignalOptions<T> {
 }
 
 /**
+ * Possible states for a Computed signal
+ */
+type ComputedState = "clean" | "checked" | "computing" | "dirty";
+
+/**
  * Signal namespace containing State, Computed and subtle sub-namespaces
  */
 export namespace Signal {
@@ -177,6 +182,13 @@ export namespace Signal {
    * - callback: The callback which is called to get the computed Signal's value
    */
   export class Computed<T> implements Signal<T> {
+    #value: T | Error | undefined = undefined;
+    #state: ComputedState = "dirty";
+    #sources: Set<Signal<any>> = new Set();
+    #sinks: Set<Computed<any> | subtle.Watcher> = new Set();
+    #equals: (this: Signal<T>, t: T, t2: T) => boolean;
+    #callback: () => T;
+
     /**
      * Constructor Algorithm:
      * The constructor sets:
@@ -185,7 +197,10 @@ export namespace Signal {
      * - state to ~dirty~
      * - value to ~uninitialized~
      */
-    constructor(cb: () => T, options?: any) {}
+    constructor(cb: () => T, options?: SignalOptions<T>) {
+      this.#callback = cb;
+      this.#equals = options?.equals ?? Object.is;
+    }
 
     /**
      * get() Algorithm:
@@ -202,17 +217,152 @@ export namespace Signal {
      *    Return the Signal's value. If the value is an exception, rethrow that exception.
      */
     get(): T {
-      throw new Error("Not implemented");
+      if (frozen) {
+        throw new Error("Cannot read signals during notify callback");
+      }
+
+      if (this.#state === "computing") {
+        throw new Error("Detected cyclic dependency in computed signal");
+      }
+
+      // Add ourselves as a dependency if we're being computed
+      if (computing) {
+        computing.addSource(this);
+      }
+
+      // If we're dirty or checked, we need to recompute
+      if (this.#state === "dirty" || this.#state === "checked") {
+        // Find the deepest, leftmost dirty signal
+        const toRecompute = this.findDeepestDirtySource();
+
+        // Recompute it
+        if (toRecompute) {
+          toRecompute.recompute();
+        }
+      }
+
+      // At this point we should be clean
+      if (this.#state !== "clean") {
+        throw new Error(
+          "Computed signal in unexpected state after recomputation"
+        );
+      }
+
+      // If the value is an error, rethrow it
+      if (this.#value instanceof Error) {
+        throw this.#value;
+      }
+
+      return this.#value as T;
     }
 
-    // Add source tracking
+    /**
+     * Add source tracking
+     * Adds a signal as a dependency of this computed
+     */
     addSource(source: Signal<any>): void {
-      throw new Error("Not implemented");
+      this.#sources.add(source);
     }
 
-    // Add state management
+    /**
+     * Add state management
+     * Marks this computed as dirty, requiring recomputation
+     */
     markDirty(): void {
-      throw new Error("Not implemented");
+      if (this.#state === "clean") {
+        this.#state = "dirty";
+
+        // Mark all sinks as checked/pending
+        for (const sink of this.#sinks) {
+          if (sink instanceof Computed) {
+            if (sink.#state === "clean") {
+              sink.#state = "checked";
+            }
+          } else if (sink instanceof subtle.Watcher) {
+            if (sink.isWatching()) {
+              sink.markPending();
+            }
+          }
+        }
+      }
+    }
+
+    /**
+     * Internal method to find the deepest, leftmost dirty source
+     */
+    private findDeepestDirtySource(): Computed<any> | null {
+      // Do a depth-first search through sources
+      for (const source of this.#sources) {
+        if (source instanceof Computed) {
+          if (source.#state === "dirty") {
+            return source;
+          }
+          if (source.#state !== "clean") {
+            const deeperSource = source.findDeepestDirtySource();
+            if (deeperSource) {
+              return deeperSource;
+            }
+          }
+        }
+      }
+
+      // If we're dirty, return ourselves
+      return this.#state === "dirty" ? this : null;
+    }
+
+    /**
+     * Internal method to recompute the value
+     * Implements the "recalculate dirty computed Signal" algorithm
+     */
+    private recompute(): void {
+      // Clear out sources and remove ourselves from their sinks
+      for (const source of this.#sources) {
+        if (source instanceof Computed || source instanceof State) {
+          source.removeSink(this);
+        }
+      }
+      this.#sources.clear();
+
+      // Save previous computing context
+      const prevComputing = computing;
+      computing = this;
+
+      // Mark that we're computing
+      this.#state = "computing";
+
+      try {
+        // Run the callback to get new value
+        const newValue = this.#callback.call(this);
+
+        // Check if value changed
+        if (!this.#equals.call(this, this.#value as T, newValue)) {
+          this.#value = newValue;
+          // Mark sinks as dirty
+          for (const sink of this.#sinks) {
+            if (sink instanceof Computed) {
+              sink.markDirty();
+            }
+          }
+        }
+
+        this.#state = "clean";
+      } catch (e) {
+        // Store error to be rethrown on next get()
+        this.#value = e as Error;
+        this.#state = "clean";
+      } finally {
+        // Restore computing context
+        computing = prevComputing;
+      }
+    }
+
+    // Internal method for sink management
+    addSink(sink: Computed<any> | subtle.Watcher): void {
+      this.#sinks.add(sink);
+    }
+
+    removeSink(sink: Computed<any> | subtle.Watcher): void {
+      this.#sinks.delete(sink);
     }
   }
 
