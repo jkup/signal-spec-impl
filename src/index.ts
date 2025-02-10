@@ -71,8 +71,8 @@ export namespace Signal {
     constructor(initialValue: T, options?: SignalOptions<T>) {
       this.#value = initialValue;
       this.#equals = options?.equals ?? Object.is;
-      this.#watched = options?.[watchedSymbol];
-      this.#unwatched = options?.[unwatchedSymbol];
+      this.#watched = options?.[WATCHED];
+      this.#unwatched = options?.[UNWATCHED];
       this.#sinks = new Set();
     }
 
