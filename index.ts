@@ -555,7 +555,14 @@ export namespace Signal {
      * 5. Return the return value of cb (rethrowing any exception).
      */
     export function untrack<T>(cb: () => T): T {
-      throw new Error("Not implemented");
+      const prevComputing = computing;
+      computing = null;
+
+      try {
+        return cb();
+      } finally {
+        computing = prevComputing;
+      }
     }
 
     /**
@@ -563,7 +570,7 @@ export namespace Signal {
      * 1. Return the current computing value.
      */
     export function currentComputed(): Computed<any> | null {
-      throw new Error("Not implemented");
+      return computing;
     }
   }
 }
