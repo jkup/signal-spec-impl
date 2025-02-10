@@ -1,17 +1,15 @@
-import { test, describe } from "node:test";
-import assert from "node:assert/strict";
-import { Signal } from "../index.js";
-import type { TestContext } from "node:test";
+import { describe, test, expect } from "vitest";
+import { Signal } from "../src/index.js";
 
-test("State signal basic functionality", async (t: TestContext) => {
-  await t.test("should create a state signal with initial value", () => {
+describe("State signal basic functionality", () => {
+  test("should create a state signal with initial value", () => {
     const signal = new Signal.State(42);
-    assert.equal(signal.get(), 42);
+    expect(signal.get()).toBe(42);
   });
 
-  await t.test("should update state signal value", () => {
+  test("should update state signal value", () => {
     const signal = new Signal.State(42);
     signal.set(43);
-    assert.equal(signal.get(), 43);
+    expect(signal.get()).toBe(43);
   });
 });

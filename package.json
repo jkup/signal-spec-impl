@@ -4,12 +4,13 @@
   "description": "Implementation of the JavaScript Signals specification",
   "type": "module",
   "scripts": {
-    "test": "node --loader ts-node/esm --test **/*.test.ts",
+    "test": "vitest run",
     "build": "tsc"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^20.10.5",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "vitest": "^1.1.0"
   }
 }

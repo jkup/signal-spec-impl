@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {Signal} from '../../../src/wrapper.js';
+import {Signal} from '../../../src/index.js';
 
 describe('Watcher', () => {
   type Destructor = () => void;
