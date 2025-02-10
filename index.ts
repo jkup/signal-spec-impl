@@ -13,6 +13,9 @@ let generation: number = 0;
 export const WATCHED = Symbol.for("watched");
 export const UNWATCHED = Symbol.for("unwatched");
 
+// Add WatcherState type definition at the top with other types
+type WatcherState = "watching" | "pending" | "waiting";
+
 /**
  * Base Signal interface that both State and Computed implement
  */
@@ -375,13 +378,19 @@ export namespace Signal {
      * - notifyCallback: The callback which is called when something changes
      */
     export class Watcher {
+      #state: WatcherState = "waiting";
+      #signals: Set<Signal<any>> = new Set();
+      #notifyCallback: () => void;
+
       /**
        * Constructor Algorithm:
        * 1. state is set to ~waiting~.
        * 2. Initialize signals as an empty set.
        * 3. notifyCallback is set to the callback parameter.
        */
-      constructor(callback: () => void) {}
+      constructor(callback: () => void) {
+        this.#notifyCallback = callback;
+      }
 
       /**
        * watch() Algorithm:
@@ -397,7 +406,43 @@ export namespace Signal {
        * 5. If the Signal's state is ~waiting~, then set it to ~watching~.
        */
       watch(...signals: Signal<any>[]): void {
-        throw new Error("Not implemented");
+        if (frozen) {
+          throw new Error("Cannot modify watchers during notify callback");
+        }
+
+        // Validate all signals before modifying anything
+        for (const signal of signals) {
+          if (!(signal instanceof State || signal instanceof Computed)) {
+            throw new Error("Invalid signal provided to watch");
+          }
+        }
+
+        // Add signals and set up watching
+        for (const signal of signals) {
+          if (!this.#signals.has(signal)) {
+            this.#signals.add(signal);
+
+            if (signal instanceof State || signal instanceof Computed) {
+              signal.addSink(this);
+
+              // Call watched callback if it exists
+              const watchedCallback = (signal as any)[WATCHED];
+              if (watchedCallback) {
+                frozen = true;
+                try {
+                  watchedCallback.call(signal);
+                } finally {
+                  frozen = false;
+                }
+              }
+            }
+          }
+        }
+
+        // Update state if we have signals to watch
+        if (this.#signals.size > 0 && this.#state === "waiting") {
+          this.#state = "watching";
+        }
       }
 
       /**
@@ -414,7 +459,43 @@ export namespace Signal {
        * 4. If the watcher now has no signals, and its state is ~watching~, then set it to ~waiting~.
        */
       unwatch(...signals: Signal<any>[]): void {
-        throw new Error("Not implemented");
+        if (frozen) {
+          throw new Error("Cannot modify watchers during notify callback");
+        }
+
+        // Validate all signals before modifying anything
+        for (const signal of signals) {
+          if (!this.#signals.has(signal)) {
+            throw new Error(
+              "Cannot unwatch a signal that is not being watched"
+            );
+          }
+        }
+
+        // Remove signals and clean up
+        for (const signal of signals) {
+          this.#signals.delete(signal);
+
+          if (signal instanceof State || signal instanceof Computed) {
+            signal.removeSink(this);
+
+            // Call unwatched callback if it exists
+            const unwatchedCallback = (signal as any)[UNWATCHED];
+            if (unwatchedCallback) {
+              frozen = true;
+              try {
+                unwatchedCallback.call(signal);
+              } finally {
+                frozen = false;
+              }
+            }
+          }
+        }
+
+        // Update state if we have no more signals
+        if (this.#signals.size === 0 && this.#state === "watching") {
+          this.#state = "waiting";
+        }
       }
 
       /**
@@ -422,23 +503,46 @@ export namespace Signal {
        * 1. Return an Array containing the subset of signals which are Computed Signals in the states ~dirty~ or ~pending~.
        */
       getPending(): Signal<any>[] {
-        throw new Error("Not implemented");
+        return Array.from(this.#signals).filter((signal) => {
+          if (signal instanceof Computed) {
+            const state = (signal as any).#state;
+            return state === "dirty" || state === "pending";
+          }
+          return false;
+        });
       }
 
+      /**
+       * Check if the watcher is in watching state
+       */
       isWatching(): boolean {
-        throw new Error("Not implemented");
+        return this.#state === "watching";
       }
 
+      /**
+       * Mark the watcher as pending (needs notification)
+       */
       markPending(): void {
-        throw new Error("Not implemented");
+        if (this.#state === "watching") {
+          this.#state = "pending";
+        }
       }
 
+      /**
+       * Mark the watcher as waiting (notification handled)
+       */
       markWaiting(): void {
-        throw new Error("Not implemented");
+        this.#state = "waiting";
       }
 
+      /**
+       * Notify callback execution
+       */
       notify(): void {
-        throw new Error("Not implemented");
+        if (frozen) {
+          throw new Error("Cannot notify during another notification");
+        }
+        this.#notifyCallback();
       }
     }
 
