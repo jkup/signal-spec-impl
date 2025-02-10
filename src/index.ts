@@ -151,13 +151,10 @@ export namespace Signal {
 
       // Notify watchers
       for (const watcher of watchersToNotify) {
-        frozen = true;
         try {
           watcher.notify();
         } catch (e) {
           exceptions.push(e as Error);
-        } finally {
-          frozen = false;
         }
         watcher.markWaiting();
       }
@@ -569,10 +566,13 @@ export namespace Signal {
        * Notify callback execution
        */
       notify(): void {
-        if (frozen) {
-          throw new Error("Cannot notify during another notification");
+        const prevFrozen = frozen;
+        frozen = false; // Allow operations during notification
+        try {
+          this.#notifyCallback();
+        } finally {
+          frozen = prevFrozen; // Restore previous frozen state
         }
-        this.#notifyCallback();
       }
 
       // Add accessor method
