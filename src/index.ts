@@ -9,9 +9,12 @@ let computing: any = null;
 let frozen: boolean = false;
 let generation: number = 0;
 
-// Define watched/unwatched symbols
-export const WATCHED = Symbol.for("watched");
-export const UNWATCHED = Symbol.for("unwatched");
+// Define watched/unwatched symbols at the top level
+declare const watchedSymbol: unique symbol;
+declare const unwatchedSymbol: unique symbol;
+
+export const WATCHED: typeof watchedSymbol = Symbol.for("watched") as any;
+export const UNWATCHED: typeof unwatchedSymbol = Symbol.for("unwatched") as any;
 
 // Add WatcherState type definition at the top with other types
 type WatcherState = "watching" | "pending" | "waiting";
@@ -28,8 +31,8 @@ export interface Signal<T> {
  */
 export interface SignalOptions<T> {
   equals?: (this: Signal<T>, t: T, t2: T) => boolean;
-  [WATCHED]?: (this: Signal<T>) => void;
-  [UNWATCHED]?: (this: Signal<T>) => void;
+  [watchedSymbol]?: (this: Signal<T>) => void;
+  [unwatchedSymbol]?: (this: Signal<T>) => void;
 }
 
 /**
@@ -68,8 +71,8 @@ export namespace Signal {
     constructor(initialValue: T, options?: SignalOptions<T>) {
       this.#value = initialValue;
       this.#equals = options?.equals ?? Object.is;
-      this.#watched = options?.[Symbol.for("watched")];
-      this.#unwatched = options?.[Symbol.for("unwatched")];
+      this.#watched = options?.[watchedSymbol];
+      this.#unwatched = options?.[unwatchedSymbol];
       this.#sinks = new Set();
     }
 
@@ -171,6 +174,11 @@ export namespace Signal {
 
     removeSink(sink: Computed<any> | subtle.Watcher): void {
       this.#sinks.delete(sink);
+    }
+
+    // Add accessor methods
+    _getSinks(): Set<Computed<any> | subtle.Watcher> {
+      return this.#sinks;
     }
   }
 
@@ -367,6 +375,15 @@ export namespace Signal {
     removeSink(sink: Computed<any> | subtle.Watcher): void {
       this.#sinks.delete(sink);
     }
+
+    // Add accessor methods
+    _getSources(): Set<State<any> | Computed<any>> {
+      return this.#sources as Set<State<any> | Computed<any>>;
+    }
+
+    _getSinks(): Set<Computed<any> | subtle.Watcher> {
+      return this.#sinks;
+    }
   }
 
   export namespace subtle {
@@ -544,6 +561,11 @@ export namespace Signal {
         }
         this.#notifyCallback();
       }
+
+      // Add accessor method
+      _getSignals(): Set<State<any> | Computed<any>> {
+        return this.#signals as Set<State<any> | Computed<any>>;
+      }
     }
 
     /**
@@ -572,5 +594,64 @@ export namespace Signal {
     export function currentComputed(): Computed<any> | null {
       return computing;
     }
+
+    /**
+     * Returns ordered list of all signals which this one referenced
+     * during the last time it was evaluated.
+     * For a Watcher, lists the set of signals which it is watching.
+     */
+    export function introspectSources(
+      s: Computed<any> | Watcher
+    ): (State<any> | Computed<any>)[] {
+      if (s instanceof Watcher) {
+        return Array.from(s._getSignals());
+      } else if (s instanceof Computed) {
+        return Array.from(s._getSources());
+      }
+      throw new Error("Invalid argument to introspectSources");
+    }
+
+    /**
+     * Returns the Watchers that this signal is contained in, plus any
+     * Computed signals which read this signal last time they were evaluated,
+     * if that computed signal is (recursively) watched.
+     */
+    export function introspectSinks(
+      s: State<any> | Computed<any>
+    ): (Computed<any> | Watcher)[] {
+      if (s instanceof State || s instanceof Computed) {
+        return Array.from(s._getSinks());
+      }
+      throw new Error("Invalid argument to introspectSinks");
+    }
+
+    /**
+     * True if this signal is "live", in that it is watched by a Watcher,
+     * or it is read by a Computed signal which is (recursively) live.
+     */
+    export function hasSinks(s: State<any> | Computed<any>): boolean {
+      if (s instanceof State || s instanceof Computed) {
+        return s._getSinks().size > 0;
+      }
+      throw new Error("Invalid argument to hasSinks");
+    }
+
+    /**
+     * True if this element is "reactive", in that it depends
+     * on some other signal. A Computed where hasSources is false
+     * will always return the same constant.
+     */
+    export function hasSources(s: Computed<any> | Watcher): boolean {
+      if (s instanceof Watcher) {
+        return s._getSignals().size > 0;
+      } else if (s instanceof Computed) {
+        return s._getSources().size > 0;
+      }
+      throw new Error("Invalid argument to hasSources");
+    }
+
+    // Export the symbols in subtle namespace too
+    export const watched = WATCHED;
+    export const unwatched = UNWATCHED;
   }
 }
