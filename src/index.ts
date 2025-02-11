@@ -16,7 +16,7 @@ declare const unwatchedSymbol: unique symbol;
 export const WATCHED: typeof watchedSymbol = Symbol.for("watched") as any;
 export const UNWATCHED: typeof unwatchedSymbol = Symbol.for("unwatched") as any;
 
-// Add WatcherState type definition at the top with other types
+// Add WatcherState type definition at the top level with other types
 type WatcherState = "watching" | "pending" | "waiting";
 
 /**
@@ -31,8 +31,8 @@ export interface Signal<T> {
  */
 export interface SignalOptions<T> {
   equals?: (this: Signal<T>, t: T, t2: T) => boolean;
-  [watchedSymbol]?: (this: Signal<T>) => void;
-  [unwatchedSymbol]?: (this: Signal<T>) => void;
+  [WATCHED]?: (this: Signal<T>) => void;
+  [UNWATCHED]?: (this: Signal<T>) => void;
 }
 
 /**
@@ -183,6 +183,10 @@ export namespace Signal {
     _getSinks(): Set<Computed<any> | subtle.Watcher> {
       return this.#sinks;
     }
+
+    _getWatchedCallback(): ((this: Signal<T>) => void) | undefined {
+      return this.#watched;
+    }
   }
 
   /**
@@ -245,7 +249,7 @@ export namespace Signal {
       }
 
       // If we're dirty or checked, we need to recompute
-      if (this.#state === "dirty" || this.#state === "checked") {
+      if (this.#state === "dirty") {
         // Find the deepest, leftmost dirty signal
         const toRecompute = this.findDeepestDirtySource();
 
@@ -255,9 +259,14 @@ export namespace Signal {
         }
 
         // If we're still dirty after recomputing dependencies, recompute ourselves
-        if (this.#state === "dirty" || this.#state === "checked") {
+        if (this.#state === "dirty") {
           this.recompute();
         }
+      }
+
+      // If we're in checked state, we don't need to recompute
+      if (this.#state === "checked") {
+        this.#state = "clean";
       }
 
       // At this point we should be clean
@@ -280,18 +289,20 @@ export namespace Signal {
      * Marks this computed as dirty, requiring recomputation
      */
     markDirty(): void {
-      // Always recompute when marked dirty
-      this.#state = "dirty";
+      // Only mark dirty if we're currently clean
+      if (this.#state === "clean") {
+        this.#state = "dirty";
 
-      // Mark all sinks as checked/pending
-      for (const sink of this.#sinks) {
-        if (sink instanceof Computed) {
-          if (sink.#state === "clean") {
-            sink.#state = "checked";
-          }
-        } else if (sink instanceof subtle.Watcher) {
-          if (sink.isWatching()) {
-            sink.markPending();
+        // Mark all sinks as checked/pending
+        for (const sink of this.#sinks) {
+          if (sink instanceof Computed) {
+            if (sink.#state === "clean") {
+              sink.#state = "checked";
+            }
+          } else if (sink instanceof subtle.Watcher) {
+            if (sink.isWatching()) {
+              sink.markPending();
+            }
           }
         }
       }
@@ -355,22 +366,32 @@ export namespace Signal {
         // Run the callback to get new value
         const newValue = this.#callback.call(this);
 
-        // Check if value changed
-        if (!this.#equals.call(this, this.#value as T, newValue)) {
-          this.#value = newValue;
-          // Mark sinks as dirty
+        // Check if this is first computation or value changed
+        const isFirstComputation = this.#value === undefined;
+        const valueChanged =
+          isFirstComputation ||
+          !this.#equals.call(this, this.#value as T, newValue);
+
+        // Always update the value
+        this.#value = newValue;
+
+        // Mark sinks as dirty if value changed
+        if (valueChanged) {
           for (const sink of this.#sinks) {
             if (sink instanceof Computed) {
               sink.markDirty();
+            } else if (sink instanceof subtle.Watcher) {
+              sink.markPending();
             }
           }
         }
 
         this.#state = "clean";
       } catch (e) {
-        // Store error to be rethrown on next get()
+        // Store error and mark as dirty to ensure it's thrown on next get()
         this.#value = e as Error;
-        this.#state = "clean";
+        this.#state = "dirty";
+        throw e;
       } finally {
         // Restore computing context
         computing = prevComputing;
@@ -440,7 +461,7 @@ export namespace Signal {
         // Validate all signals before modifying anything
         for (const signal of signals) {
           if (!(signal instanceof State || signal instanceof Computed)) {
-            throw new Error("Invalid signal provided to watch");
+            throw new TypeError("Invalid signal provided to watch");
           }
         }
 
@@ -450,16 +471,46 @@ export namespace Signal {
             this.#signals.add(signal);
 
             if (signal instanceof State || signal instanceof Computed) {
+              const wasEmpty = signal._getSinks().size === 0;
               signal.addSink(this);
 
-              // Call watched callback if it exists
-              const watchedCallback = (signal as any)[WATCHED];
-              if (watchedCallback) {
-                frozen = true;
-                try {
-                  watchedCallback.call(signal);
-                } finally {
-                  frozen = false;
+              // For computed signals, establish dependencies and handle watched callbacks
+              if (signal instanceof Computed) {
+                // We need to evaluate to establish dependencies, but in an untracked context
+                Signal.subtle.untrack(() => {
+                  signal.get();
+                  // After evaluation, check if any of its sources need watched callbacks
+                  if (wasEmpty) {
+                    for (const source of signal._getSources()) {
+                      if (source instanceof State) {
+                        const wasSourceEmpty = source._getSinks().size === 1;
+                        if (wasSourceEmpty) {
+                          const watchedCallback = source._getWatchedCallback();
+                          if (watchedCallback) {
+                            frozen = true;
+                            try {
+                              watchedCallback.call(source);
+                            } finally {
+                              frozen = false;
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                });
+              }
+
+              // Call watched callback if it exists and this is the first sink
+              if (wasEmpty && signal instanceof State) {
+                const watchedCallback = signal._getWatchedCallback();
+                if (watchedCallback) {
+                  frozen = true;
+                  try {
+                    watchedCallback.call(signal);
+                  } finally {
+                    frozen = false;
+                  }
                 }
               }
             }
@@ -493,7 +544,7 @@ export namespace Signal {
         // Validate all signals before modifying anything
         for (const signal of signals) {
           if (!this.#signals.has(signal)) {
-            throw new Error(
+            throw new TypeError(
               "Cannot unwatch a signal that is not being watched"
             );
           }
@@ -506,14 +557,37 @@ export namespace Signal {
           if (signal instanceof State || signal instanceof Computed) {
             signal.removeSink(this);
 
-            // Call unwatched callback if it exists
-            const unwatchedCallback = (signal as any)[UNWATCHED];
-            if (unwatchedCallback) {
-              frozen = true;
-              try {
-                unwatchedCallback.call(signal);
-              } finally {
-                frozen = false;
+            // Call unwatched callback if this was the last sink
+            if (signal._getSinks().size === 0) {
+              if (signal instanceof State) {
+                const unwatchedCallback = signal._getWatchedCallback();
+                if (unwatchedCallback) {
+                  frozen = true;
+                  try {
+                    unwatchedCallback.call(signal);
+                  } finally {
+                    frozen = false;
+                  }
+                }
+              }
+              // Also handle unwatched callbacks for sources of computed signals
+              if (signal instanceof Computed) {
+                for (const source of signal._getSources()) {
+                  if (
+                    source instanceof State &&
+                    source._getSinks().size === 0
+                  ) {
+                    const unwatchedCallback = (source as any)[UNWATCHED];
+                    if (unwatchedCallback) {
+                      frozen = true;
+                      try {
+                        unwatchedCallback.call(source);
+                      } finally {
+                        frozen = false;
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -567,9 +641,9 @@ export namespace Signal {
        */
       notify(): void {
         const prevFrozen = frozen;
-        frozen = false; // Allow operations during notification
+        frozen = true; // Set frozen during notification
         try {
-          this.#notifyCallback();
+          this.#notifyCallback.call(this);
         } finally {
           frozen = prevFrozen; // Restore previous frozen state
         }
@@ -604,8 +678,8 @@ export namespace Signal {
      * currentComputed() Algorithm:
      * 1. Return the current computing value.
      */
-    export function currentComputed(): Computed<any> | null {
-      return computing;
+    export function currentComputed(): Computed<any> | undefined {
+      return computing ?? undefined;
     }
 
     /**
@@ -621,7 +695,7 @@ export namespace Signal {
       } else if (s instanceof Computed) {
         return Array.from(s._getSources());
       }
-      throw new Error("Invalid argument to introspectSources");
+      throw new TypeError("Invalid argument to introspectSources");
     }
 
     /**
@@ -635,7 +709,7 @@ export namespace Signal {
       if (s instanceof State || s instanceof Computed) {
         return Array.from(s._getSinks());
       }
-      throw new Error("Invalid argument to introspectSinks");
+      throw new TypeError("Invalid argument to introspectSinks");
     }
 
     /**
@@ -646,7 +720,7 @@ export namespace Signal {
       if (s instanceof State || s instanceof Computed) {
         return s._getSinks().size > 0;
       }
-      throw new Error("Invalid argument to hasSinks");
+      throw new TypeError("Invalid argument to hasSinks");
     }
 
     /**
@@ -660,11 +734,20 @@ export namespace Signal {
       } else if (s instanceof Computed) {
         return s._getSources().size > 0;
       }
-      throw new Error("Invalid argument to hasSources");
+      throw new TypeError("Invalid argument to hasSources");
     }
 
     // Export the symbols in subtle namespace too
     export const watched = WATCHED;
     export const unwatched = UNWATCHED;
+  }
+
+  // Add type guards at the top level
+  export function isState(value: any): value is State<any> {
+    return value instanceof State;
+  }
+
+  export function isComputed(value: any): value is Computed<any> {
+    return value instanceof Computed;
   }
 }

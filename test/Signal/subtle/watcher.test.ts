@@ -152,7 +152,9 @@ describe("Watcher", () => {
   it("provides `this` to notify as normal function", () => {
     const mockGetPending = vi.fn();
 
-    const watcher = new Signal.subtle.Watcher(function () {
+    const watcher = new Signal.subtle.Watcher(function (
+      this: Signal.subtle.Watcher
+    ) {
       this.getPending();
     });
     watcher.getPending = mockGetPending;
