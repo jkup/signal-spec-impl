@@ -44,7 +44,6 @@ export interface Signal<T> {
  * Options interface for Signal creation
  */
 export interface SignalOptions<T> {
-  equals?: (this: Signal<T>, t: T, t2: T) => boolean;
   [WATCHED]?: (this: Signal<T>) => void;
   [UNWATCHED]?: (this: Signal<T>) => void;
 }
@@ -64,7 +63,6 @@ export namespace Signal {
    */
   export class State<T> implements Signal<T> {
     #value: T;
-    #equals: (this: Signal<T>, t: T, t2: T) => boolean;
     #watched?: (this: Signal<T>) => void;
     #unwatched?: (this: Signal<T>) => void;
     #sinks: Set<Computed<any> | subtle.Watcher>;
@@ -72,14 +70,12 @@ export namespace Signal {
     /**
      * Constructor Algorithm:
      * 1. Set this Signal's value to initialValue.
-     * 2. Set this Signal's equals to options?.equals
-     * 3. Set this Signal's watched to options?.[Signal.subtle.watched]
-     * 4. Set this Signal's unwatched to options?.[Signal.subtle.unwatched]
-     * 5. Set this Signal's sinks to the empty set
+     * 2. Set this Signal's watched to options?.[Signal.subtle.watched]
+     * 3. Set this Signal's unwatched to options?.[Signal.subtle.unwatched]
+     * 4. Set this Signal's sinks to the empty set
      */
     constructor(initialValue: T, options?: SignalOptions<T>) {
       this.#value = initialValue;
-      this.#equals = options?.equals ?? Object.is;
       this.#watched = options?.[WATCHED];
       this.#unwatched = options?.[UNWATCHED];
       this.#sinks = new Set();
@@ -97,7 +93,6 @@ export namespace Signal {
         throw new Error("Cannot read signals during notify callback");
       }
 
-      // If we're currently computing a signal, add this signal as a dependency
       if (computing) {
         computing.addSource(this);
       }
@@ -128,27 +123,22 @@ export namespace Signal {
         throw new Error("Cannot write signals during notify callback");
       }
 
-      // Run set Signal value algorithm
-      if (this.#equals.call(this, this.#value, newValue)) {
-        return; // Clean exit - no changes needed
+      // Use direct value comparison
+      if (this.#value === newValue) {
+        return;
       }
 
       this.#value = newValue;
 
-      // Track exceptions from notify callbacks
       const exceptions: Error[] = [];
-
-      // Mark all dependent signals as dirty/pending and collect watchers
       const watchersToNotify = new Set<subtle.Watcher>();
 
-      // First mark all computed signals as dirty
       for (const sink of this.#sinks) {
         if (sink instanceof Computed) {
           sink.markDirty();
         }
       }
 
-      // Then handle watchers
       for (const sink of this.#sinks) {
         if (sink instanceof subtle.Watcher) {
           if (sink.isWatching()) {
@@ -158,7 +148,6 @@ export namespace Signal {
         }
       }
 
-      // Notify watchers
       for (const watcher of watchersToNotify) {
         try {
           watcher.notify();
@@ -168,7 +157,6 @@ export namespace Signal {
         watcher.markWaiting();
       }
 
-      // If we collected any exceptions, throw them
       if (exceptions.length === 1) {
         throw exceptions[0];
       } else if (exceptions.length > 1) {
@@ -213,7 +201,6 @@ export namespace Signal {
     #flags: SignalFlags = SignalFlags.Dirty | SignalFlags.Computed;
     #sources: Set<Signal<any>> = new Set();
     #sinks: Set<Computed<any> | subtle.Watcher> = new Set();
-    #equals: (this: Signal<T>, t: T, t2: T) => boolean;
     #callback: () => T;
 
     /**
@@ -226,7 +213,6 @@ export namespace Signal {
      */
     constructor(cb: () => T, options?: SignalOptions<T>) {
       this.#callback = cb;
-      this.#equals = options?.equals ?? Object.is;
     }
 
     /**
@@ -355,7 +341,6 @@ export namespace Signal {
      * Implements the "recalculate dirty computed Signal" algorithm
      */
     private recompute(): void {
-      // Clear out sources and remove ourselves from their sinks
       for (const source of this.#sources) {
         if (source instanceof Computed || source instanceof State) {
           source.removeSink(this);
@@ -363,27 +348,19 @@ export namespace Signal {
       }
       this.#sources.clear();
 
-      // Save previous computing context
       const prevComputing = computing;
       computing = this;
 
-      // Mark that we're computing
       this.#flags |= SignalFlags.Computing;
 
       try {
-        // Run the callback to get new value
         const newValue = this.#callback.call(this);
 
-        // Check if this is first computation or value changed
-        const isFirstComputation = this.#value === undefined;
-        const valueChanged =
-          isFirstComputation ||
-          !this.#equals.call(this, this.#value as T, newValue);
+        // Use direct value comparison
+        const valueChanged = this.#value !== newValue;
 
-        // Always update the value
         this.#value = newValue;
 
-        // Mark sinks as dirty if value changed
         if (valueChanged) {
           for (const sink of this.#sinks) {
             if (sink instanceof Computed) {
@@ -400,12 +377,10 @@ export namespace Signal {
           SignalFlags.Checked
         );
       } catch (e) {
-        // Store error and mark as dirty to ensure it's thrown on next get()
         this.#value = e as Error;
         this.#flags |= SignalFlags.Dirty;
         throw e;
       } finally {
-        // Restore computing context
         computing = prevComputing;
       }
     }
