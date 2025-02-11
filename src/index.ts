@@ -20,6 +20,20 @@ export const UNWATCHED: typeof unwatchedSymbol = Symbol.for("unwatched") as any;
 type WatcherState = "watching" | "pending" | "waiting";
 
 /**
+ * Flags for tracking signal states
+ */
+export const enum SignalFlags {
+  Clean = 0,
+  Computed = 1 << 0,
+  Effect = 1 << 1,
+  Tracking = 1 << 2,
+  Computing = 1 << 3,
+  Dirty = 1 << 4,
+  Checked = 1 << 5,
+  Pending = 1 << 6,
+}
+
+/**
  * Base Signal interface that both State and Computed implement
  */
 export interface Signal<T> {
@@ -34,11 +48,6 @@ export interface SignalOptions<T> {
   [WATCHED]?: (this: Signal<T>) => void;
   [UNWATCHED]?: (this: Signal<T>) => void;
 }
-
-/**
- * Possible states for a Computed signal
- */
-type ComputedState = "clean" | "checked" | "computing" | "dirty";
 
 /**
  * Signal namespace containing State, Computed and subtle sub-namespaces
@@ -201,7 +210,7 @@ export namespace Signal {
    */
   export class Computed<T> implements Signal<T> {
     #value: T | Error | undefined = undefined;
-    #state: ComputedState = "dirty";
+    #flags: SignalFlags = SignalFlags.Dirty | SignalFlags.Computed;
     #sources: Set<Signal<any>> = new Set();
     #sinks: Set<Computed<any> | subtle.Watcher> = new Set();
     #equals: (this: Signal<T>, t: T, t2: T) => boolean;
@@ -239,7 +248,7 @@ export namespace Signal {
         throw new Error("Cannot read signals during notify callback");
       }
 
-      if (this.#state === "computing") {
+      if (this.#flags & SignalFlags.Computing) {
         throw new Error("Detected cyclic dependency in computed signal");
       }
 
@@ -249,7 +258,7 @@ export namespace Signal {
       }
 
       // If we're dirty or checked, we need to recompute
-      if (this.#state === "dirty") {
+      if (this.#flags & SignalFlags.Dirty) {
         // Find the deepest, leftmost dirty signal
         const toRecompute = this.findDeepestDirtySource();
 
@@ -259,18 +268,18 @@ export namespace Signal {
         }
 
         // If we're still dirty after recomputing dependencies, recompute ourselves
-        if (this.#state === "dirty") {
+        if (this.#flags & SignalFlags.Dirty) {
           this.recompute();
         }
       }
 
       // If we're in checked state, we don't need to recompute
-      if (this.#state === "checked") {
-        this.#state = "clean";
+      if (this.#flags & SignalFlags.Checked) {
+        this.#flags &= ~SignalFlags.Checked;
       }
 
       // At this point we should be clean
-      if (this.#state !== "clean") {
+      if (this.#flags & (SignalFlags.Dirty | SignalFlags.Computing)) {
         throw new Error(
           "Computed signal in unexpected state after recomputation"
         );
@@ -289,15 +298,14 @@ export namespace Signal {
      * Marks this computed as dirty, requiring recomputation
      */
     markDirty(): void {
-      // Only mark dirty if we're currently clean
-      if (this.#state === "clean") {
-        this.#state = "dirty";
+      if (!(this.#flags & SignalFlags.Dirty)) {
+        this.#flags |= SignalFlags.Dirty;
 
         // Mark all sinks as checked/pending
         for (const sink of this.#sinks) {
           if (sink instanceof Computed) {
-            if (sink.#state === "clean") {
-              sink.#state = "checked";
+            if (!(sink.#flags & (SignalFlags.Dirty | SignalFlags.Checked))) {
+              sink.#flags |= SignalFlags.Checked;
             }
           } else if (sink instanceof subtle.Watcher) {
             if (sink.isWatching()) {
@@ -326,10 +334,10 @@ export namespace Signal {
       // Do a depth-first search through sources
       for (const source of this.#sources) {
         if (source instanceof Computed) {
-          if (source.#state === "dirty") {
+          if (source.#flags & SignalFlags.Dirty) {
             return source;
           }
-          if (source.#state !== "clean") {
+          if (source.#flags & SignalFlags.Checked) {
             const deeperSource = source.findDeepestDirtySource();
             if (deeperSource) {
               return deeperSource;
@@ -339,7 +347,7 @@ export namespace Signal {
       }
 
       // If we're dirty, return ourselves
-      return this.#state === "dirty" ? this : null;
+      return this.#flags & SignalFlags.Dirty ? this : null;
     }
 
     /**
@@ -360,7 +368,7 @@ export namespace Signal {
       computing = this;
 
       // Mark that we're computing
-      this.#state = "computing";
+      this.#flags |= SignalFlags.Computing;
 
       try {
         // Run the callback to get new value
@@ -386,11 +394,15 @@ export namespace Signal {
           }
         }
 
-        this.#state = "clean";
+        this.#flags &= ~(
+          SignalFlags.Computing |
+          SignalFlags.Dirty |
+          SignalFlags.Checked
+        );
       } catch (e) {
         // Store error and mark as dirty to ensure it's thrown on next get()
         this.#value = e as Error;
-        this.#state = "dirty";
+        this.#flags |= SignalFlags.Dirty;
         throw e;
       } finally {
         // Restore computing context
@@ -414,6 +426,11 @@ export namespace Signal {
 
     _getSinks(): Set<Computed<any> | subtle.Watcher> {
       return this.#sinks;
+    }
+
+    // Add helper method to Computed class to check flags
+    hasFlag(flag: SignalFlags): boolean {
+      return (this.#flags & flag) !== 0;
     }
   }
 
@@ -606,8 +623,9 @@ export namespace Signal {
       getPending(): Signal<any>[] {
         return Array.from(this.#signals).filter((signal) => {
           if (signal instanceof Computed) {
-            const state = (signal as any).#state;
-            return state === "dirty" || state === "pending";
+            return (signal as Computed<any>).hasFlag(
+              SignalFlags.Dirty | SignalFlags.Pending
+            );
           }
           return false;
         });
