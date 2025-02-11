@@ -30,7 +30,11 @@ export const enum SignalFlags {
   Computing = 1 << 3,
   Dirty = 1 << 4,
   Checked = 1 << 5,
-  Pending = 1 << 6,
+  PendingComputed = 1 << 6,
+  PendingEffect = 1 << 7,
+  Notified = 1 << 8,
+  Recursed = 1 << 9,
+  Propagated = Dirty | PendingComputed | PendingEffect,
 }
 
 /**
@@ -52,6 +56,75 @@ export interface SignalOptions<T> {
  * Signal namespace containing State, Computed and subtle sub-namespaces
  */
 export namespace Signal {
+  /**
+   * Propagates changes through the dependency graph using a depth-first traversal
+   */
+  function propagateChange(dep: State<any> | Computed<any>): void {
+    let targetFlag = SignalFlags.Dirty;
+    let subs = dep._getSinks();
+    let stack = 0;
+
+    top: do {
+      for (const sink of subs) {
+        const subFlags =
+          sink instanceof Computed
+            ? (sink as Computed<any>).hasFlag(
+                SignalFlags.Tracking |
+                  SignalFlags.Recursed |
+                  SignalFlags.Propagated
+              )
+            : false;
+
+        // Skip if already tracking or recursed
+        if (subFlags) {
+          continue;
+        }
+
+        // Handle computed signals
+        if (sink instanceof Computed) {
+          // Mark as notified and set target flag
+          sink.setFlags(targetFlag | SignalFlags.Notified);
+
+          // If this computed has sinks, traverse deeper
+          const sinkSubs = sink._getSinks();
+          if (sinkSubs.size > 0) {
+            // If there are multiple sinks, we need to track our position for backtracking
+            if (stack > 0) {
+              targetFlag = SignalFlags.PendingComputed;
+            }
+            subs = sinkSubs;
+            stack++;
+            continue top;
+          }
+        }
+        // Handle watchers
+        else if (sink instanceof subtle.Watcher && sink.isWatching()) {
+          sink.markPending();
+        }
+      }
+
+      // Backtrack
+      while (stack > 0) {
+        stack--;
+        // Move back up to parent subs
+        const parent =
+          Array.from(subs)[0] instanceof Computed
+            ? (Array.from(subs)[0] as Computed<any>)
+                ._getSources()
+                .values()
+                .next().value
+            : null;
+        if (!parent) break;
+        subs = parent._getSinks();
+        targetFlag =
+          stack > 0 ? SignalFlags.PendingComputed : SignalFlags.Dirty;
+        continue top;
+      }
+
+      break;
+    } while (true);
+  }
+
   /**
    * State Signal Algorithm:
    * Internal slots:
@@ -123,47 +196,15 @@ export namespace Signal {
         throw new Error("Cannot write signals during notify callback");
       }
 
-      // Use direct value comparison
       if (this.#value === newValue) {
         return;
       }
 
       this.#value = newValue;
 
-      const exceptions: Error[] = [];
-      const watchersToNotify = new Set<subtle.Watcher>();
-
-      for (const sink of this.#sinks) {
-        if (sink instanceof Computed) {
-          sink.markDirty();
-        }
-      }
-
-      for (const sink of this.#sinks) {
-        if (sink instanceof subtle.Watcher) {
-          if (sink.isWatching()) {
-            watchersToNotify.add(sink);
-            sink.markPending();
-          }
-        }
-      }
-
-      for (const watcher of watchersToNotify) {
-        try {
-          watcher.notify();
-        } catch (e) {
-          exceptions.push(e as Error);
-        }
-        watcher.markWaiting();
-      }
-
-      if (exceptions.length === 1) {
-        throw exceptions[0];
-      } else if (exceptions.length > 1) {
-        throw new AggregateError(
-          exceptions,
-          "Multiple exceptions in notify callbacks"
-        );
+      // If we have sinks, propagate the change
+      if (this.#sinks.size > 0) {
+        propagateChange(this);
       }
     }
 
@@ -407,6 +448,10 @@ export namespace Signal {
     hasFlag(flag: SignalFlags): boolean {
       return (this.#flags & flag) !== 0;
     }
+
+    setFlags(flags: SignalFlags): void {
+      this.#flags |= flags;
+    }
   }
 
   export namespace subtle {
@@ -599,7 +644,9 @@ export namespace Signal {
         return Array.from(this.#signals).filter((signal) => {
           if (signal instanceof Computed) {
             return (signal as Computed<any>).hasFlag(
-              SignalFlags.Dirty | SignalFlags.Pending
+              SignalFlags.Dirty |
+                SignalFlags.PendingComputed |
+                SignalFlags.PendingEffect
             );
           }
           return false;
