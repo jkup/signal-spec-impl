@@ -50,6 +50,7 @@ export interface Signal<T> {
 export interface SignalOptions<T> {
   [WATCHED]?: (this: Signal<T>) => void;
   [UNWATCHED]?: (this: Signal<T>) => void;
+  equals?: (a: T, b: T) => boolean;
 }
 
 /**
@@ -63,6 +64,7 @@ export namespace Signal {
     let targetFlag = SignalFlags.Dirty;
     let subs = dep._getSinks();
     let stack = 0;
+    let pendingWatchers: subtle.Watcher[] = [];
 
     top: do {
       for (const sink of subs) {
@@ -100,6 +102,7 @@ export namespace Signal {
         // Handle watchers
         else if (sink instanceof subtle.Watcher && sink.isWatching()) {
           sink.markPending();
+          pendingWatchers.push(sink);
         }
       }
 
@@ -123,6 +126,11 @@ export namespace Signal {
 
       break;
     } while (true);
+
+    // Notify watchers after all propagation is done
+    for (const watcher of pendingWatchers) {
+      watcher.notify();
+    }
   }
 
   /**
@@ -136,6 +144,7 @@ export namespace Signal {
    */
   export class State<T> implements Signal<T> {
     #value: T;
+    #equals: (a: T, b: T) => boolean;
     #watched?: (this: Signal<T>) => void;
     #unwatched?: (this: Signal<T>) => void;
     #sinks: Set<Computed<any> | subtle.Watcher>;
@@ -149,6 +158,7 @@ export namespace Signal {
      */
     constructor(initialValue: T, options?: SignalOptions<T>) {
       this.#value = initialValue;
+      this.#equals = options?.equals ?? Object.is;
       this.#watched = options?.[WATCHED];
       this.#unwatched = options?.[UNWATCHED];
       this.#sinks = new Set();
@@ -196,15 +206,13 @@ export namespace Signal {
         throw new Error("Cannot write signals during notify callback");
       }
 
-      if (this.#value === newValue) {
-        return;
-      }
+      if (!this.#equals(this.#value, newValue)) {
+        this.#value = newValue;
 
-      this.#value = newValue;
-
-      // If we have sinks, propagate the change
-      if (this.#sinks.size > 0) {
-        propagateChange(this);
+        // If we have sinks, propagate the change
+        if (this.#sinks.size > 0) {
+          propagateChange(this);
+        }
       }
     }
 
@@ -243,6 +251,7 @@ export namespace Signal {
     #sources: Set<Signal<any>> = new Set();
     #sinks: Set<Computed<any> | subtle.Watcher> = new Set();
     #callback: () => T;
+    #equals: (a: T, b: T) => boolean;
 
     /**
      * Constructor Algorithm:
@@ -254,6 +263,7 @@ export namespace Signal {
      */
     constructor(cb: () => T, options?: SignalOptions<T>) {
       this.#callback = cb;
+      this.#equals = options?.equals ?? Object.is;
     }
 
     /**
@@ -285,7 +295,7 @@ export namespace Signal {
       }
 
       // If we're dirty or checked, we need to recompute
-      if (this.#flags & SignalFlags.Dirty) {
+      if (this.#flags & (SignalFlags.Dirty | SignalFlags.Checked)) {
         // Find the deepest, leftmost dirty signal
         const toRecompute = this.findDeepestDirtySource();
 
@@ -295,18 +305,16 @@ export namespace Signal {
         }
 
         // If we're still dirty after recomputing dependencies, recompute ourselves
-        if (this.#flags & SignalFlags.Dirty) {
+        if (this.#flags & (SignalFlags.Dirty | SignalFlags.Checked)) {
           this.recompute();
         }
       }
 
-      // If we're in checked state, we don't need to recompute
-      if (this.#flags & SignalFlags.Checked) {
-        this.#flags &= ~SignalFlags.Checked;
-      }
-
       // At this point we should be clean
-      if (this.#flags & (SignalFlags.Dirty | SignalFlags.Computing)) {
+      if (
+        this.#flags &
+        (SignalFlags.Dirty | SignalFlags.Computing | SignalFlags.Checked)
+      ) {
         throw new Error(
           "Computed signal in unexpected state after recomputation"
         );
@@ -327,11 +335,10 @@ export namespace Signal {
     markDirty(): void {
       if (!(this.#flags & SignalFlags.Dirty)) {
         this.#flags |= SignalFlags.Dirty;
-
         // Mark all sinks as checked/pending
         for (const sink of this.#sinks) {
           if (sink instanceof Computed) {
-            if (!(sink.#flags & (SignalFlags.Dirty | SignalFlags.Checked))) {
+            if (!(sink.#flags & SignalFlags.Dirty)) {
               sink.#flags |= SignalFlags.Checked;
             }
           } else if (sink instanceof subtle.Watcher) {
@@ -382,6 +389,7 @@ export namespace Signal {
      * Implements the "recalculate dirty computed Signal" algorithm
      */
     private recompute(): void {
+      // Clear all sources first
       for (const source of this.#sources) {
         if (source instanceof Computed || source instanceof State) {
           source.removeSink(this);
@@ -397,12 +405,15 @@ export namespace Signal {
       try {
         const newValue = this.#callback.call(this);
 
-        // Use direct value comparison
-        const valueChanged = this.#value !== newValue;
-
-        this.#value = newValue;
+        // Only update if value has changed according to equals function
+        const valueChanged =
+          this.#value === undefined ||
+          this.#value instanceof Error ||
+          !this.#equals(this.#value as T, newValue);
 
         if (valueChanged) {
+          this.#value = newValue;
+          // Mark all sinks as dirty/pending
           for (const sink of this.#sinks) {
             if (sink instanceof Computed) {
               sink.markDirty();
@@ -415,12 +426,13 @@ export namespace Signal {
         this.#flags &= ~(
           SignalFlags.Computing |
           SignalFlags.Dirty |
-          SignalFlags.Checked
+          SignalFlags.Checked |
+          SignalFlags.Notified
         );
       } catch (e) {
-        this.#value = e as Error;
+        this.#value = e instanceof Error ? e : new Error(String(e));
         this.#flags |= SignalFlags.Dirty;
-        throw e;
+        throw this.#value;
       } finally {
         computing = prevComputing;
       }
@@ -466,6 +478,7 @@ export namespace Signal {
       #state: WatcherState = "waiting";
       #signals: Set<Signal<any>> = new Set();
       #notifyCallback: () => void;
+      #pendingNotify: boolean = false;
 
       /**
        * Constructor Algorithm:
@@ -515,25 +528,10 @@ export namespace Signal {
               if (signal instanceof Computed) {
                 // We need to evaluate to establish dependencies, but in an untracked context
                 Signal.subtle.untrack(() => {
-                  signal.get();
-                  // After evaluation, check if any of its sources need watched callbacks
-                  if (wasEmpty) {
-                    for (const source of signal._getSources()) {
-                      if (source instanceof State) {
-                        const wasSourceEmpty = source._getSinks().size === 1;
-                        if (wasSourceEmpty) {
-                          const watchedCallback = source._getWatchedCallback();
-                          if (watchedCallback) {
-                            frozen = true;
-                            try {
-                              watchedCallback.call(source);
-                            } finally {
-                              frozen = false;
-                            }
-                          }
-                        }
-                      }
-                    }
+                  try {
+                    signal.get();
+                  } catch (e) {
+                    // Ignore errors during initial evaluation
                   }
                 });
               }
@@ -680,12 +678,17 @@ export namespace Signal {
        * Notify callback execution
        */
       notify(): void {
-        const prevFrozen = frozen;
-        frozen = true; // Set frozen during notification
-        try {
-          this.#notifyCallback.call(this);
-        } finally {
-          frozen = prevFrozen; // Restore previous frozen state
+        if (!this.#pendingNotify) {
+          this.#pendingNotify = true;
+          try {
+            const prevFrozen = frozen;
+            frozen = true;
+            this.#notifyCallback.call(this);
+          } finally {
+            frozen = false;
+            this.#pendingNotify = false;
+            this.#state = "watching";
+          }
         }
       }
 
